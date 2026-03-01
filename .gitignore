@@ -32,3 +32,6 @@ build/
 # Temporary
 *.tmp
 *.bak
+
+# firmware
+firmware/wifi_secrets.h
