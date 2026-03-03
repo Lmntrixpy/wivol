@@ -9,6 +9,11 @@ The goal of this project is to control application volume levels on a Windows PC
 
 ---
 
+## Disclaimer
+This software was partially created using Ai.
+
+---
+
 ## Features
 
 - 4 rotary encoders (EC11 style, incremental)
