@@ -94,12 +94,7 @@ python volumemeter.py
 ---
 
 ## Next Steps
-
-- Integrate Windows Core Audio API (e.g. pycaw)
-- Add per-application volume mapping
-- Implement master volume mode
 - Add OLED display or LED feedback
-- Design a custom PCB
 
 ---
 
