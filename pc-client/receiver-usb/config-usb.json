@@ -1,0 +1,47 @@
+{
+  "serial": {
+    "port": "COM6",
+    "baud": 115200
+  },
+
+  "windows": {
+    "apply_to_all_sessions": true,
+    "games": [
+      { "id": "R6", "processes": ["RainbowSix.exe", "RainbowSix_Vulkan.exe"] },
+      { "id": "Satisfactory", "processes": ["FactoryGameSteam.exe", "FactoryGame.exe"] },
+      { "id": "Fortnite", "processes": ["FortniteClient-Win64-Shipping.exe", "FortniteLauncher.exe"] },
+      { "id": "Minecraft", "processes": ["javaw.exe"] }
+    ]
+  },
+
+  "macos": {
+    "spotify_app_name": "Spotify"
+  },
+
+  "encoders": [
+    {
+      "name": "Master",
+      "step": 1,
+      "windows": { "type": "master" },
+      "macos": { "type": "system" }
+    },
+    {
+      "name": "Voice",
+      "step": 1,
+      "windows": { "type": "app", "process": "Discord.exe" },
+      "macos": { "type": "system" }
+    },
+    {
+      "name": "Spotify",
+      "step": 1,
+      "windows": { "type": "app", "process": "Spotify.exe" },
+      "macos": { "type": "spotify" }
+    },
+    {
+      "name": "Game (R6)",
+      "step": 1,
+      "windows": { "type": "game", "game": "R6" },
+      "macos": { "type": "system" }
+    }
+  ]
+}

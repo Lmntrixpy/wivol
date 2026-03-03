@@ -17,22 +17,7 @@
 
 */
 
-#include <WiFi.h>
-#include <WiFiUdp.h>
-
 #define NUM_ENCODERS 4
-
-// ====== WiFi / UDP CONFIG ======
-#include "wifi_secrets.h"
-
-// Set this to your PC's IP address on your LAN (e.g. 192.168.178.50)
-IPAddress PC_IP(192, 168, 178, 200);
-const uint16_t PC_PORT = 4210;
-
-// Optional: local port (any)
-const uint16_t LOCAL_PORT = 4211;
-
-WiFiUDP udp;
 
 // ====== PIN MAPPING (Encoder 5 removed) ======
 const int pinA[NUM_ENCODERS]  = {16, 19, 23, 27};
@@ -47,6 +32,12 @@ volatile uint32_t lastUs[NUM_ENCODERS] = {0};
 // Button latch (sent as 1 once, then cleared)
 bool btnLatched[NUM_ENCODERS] = {0};
 bool lastBtnRead[NUM_ENCODERS] = {0};
+
+const int ENC_DIVIDER = 2;   // 4 = typisch pro Rastung, ggf. 2 oder 1 je nach Encoder
+long encOut[NUM_ENCODERS] = {0};
+
+static long offset[NUM_ENCODERS] = {0};
+static int  startVol[NUM_ENCODERS] = {50, 50, 50, 50};
 
 // Robust quadrature table
 static const int8_t qdecTable[16] = {
@@ -81,18 +72,27 @@ void IRAM_ATTR updateEncoder(int i) {
   lastState[i] = state;
 }
 
-void connectWiFi() {
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
+void handleLine(const String& line) {
+  if (!line.startsWith("V=")) return;
 
-  Serial.print("Connecting WiFi");
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(250);
-    Serial.print(".");
+  int v[NUM_ENCODERS] = {50, 50, 50, 50};
+  int idx = 0;
+  int last = 2;
+
+  for (int i = 2; i <= (int)line.length() && idx < NUM_ENCODERS; i++) {
+    if (i == (int)line.length() || line[i] == ',') {
+      v[idx++] = line.substring(last, i).toInt();
+      last = i + 1;
+    }
   }
-  Serial.println();
-  Serial.print("ESP32 IP: ");
-  Serial.println(WiFi.localIP());
+
+  noInterrupts();
+  for (int i = 0; i < NUM_ENCODERS; i++) {
+    startVol[i] = constrain(v[i], 0, 100);
+    const long targetRaw = (long)startVol[i] * ENC_DIVIDER;
+    offset[i] = targetRaw - encoderValue[i];
+  }
+  interrupts();
 }
 
 void setup() {
@@ -121,16 +121,17 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(pinA[3]), isr3, CHANGE);
   attachInterrupt(digitalPinToInterrupt(pinB[3]), isr3, CHANGE);
 
-  connectWiFi();
-  udp.begin(LOCAL_PORT);
-
-  Serial.print("Sending UDP to ");
-  Serial.print(PC_IP);
-  Serial.print(":");
-  Serial.println(PC_PORT);
+  Serial.println("HELLO");
 }
 
 void loop() {
+  // use data from pc
+  if (Serial.available()) {
+    String line = Serial.readStringUntil('\n');
+    line.trim();
+    if (line.length() > 0) handleLine(line);
+  }
+
   // Button edge detect (latched)
   for (int i = 0; i < NUM_ENCODERS; i++) {
     bool cur = digitalRead(pinSW[i]);
@@ -138,24 +139,21 @@ void loop() {
     lastBtnRead[i] = cur;
   }
 
-  // Send packet at fixed rate
-  static uint32_t lastSendMs = 0;
-  if (millis() - lastSendMs >= 30) {  // ~33 Hz
-    lastSendMs = millis();
+  long e[NUM_ENCODERS];
+  bool b[NUM_ENCODERS];
 
-    // Build one compact line
-    // Example: E=10,0,-3,5|B=0,1,0,0
-    char buf[128];
-    snprintf(buf, sizeof(buf),
-             "E=%ld,%ld,%ld,%ld|B=%d,%d,%d,%d",
-             encoderValue[0], encoderValue[1], encoderValue[2], encoderValue[3],
-             btnLatched[0] ? 1 : 0, btnLatched[1] ? 1 : 0, btnLatched[2] ? 1 : 0, btnLatched[3] ? 1 : 0);
-
-    udp.beginPacket(PC_IP, PC_PORT);
-    udp.write((const uint8_t*)buf, strlen(buf));
-    udp.endPacket();
-
-    // clear button latches after sending
-    for (int i = 0; i < NUM_ENCODERS; i++) btnLatched[i] = false;
+  noInterrupts();
+  for (int i = 0; i < NUM_ENCODERS; i++) {
+    long raw = encoderValue[i] + offset[i];
+    e[i] = raw / ENC_DIVIDER;
+    b[i] = btnLatched[i];
+    btnLatched[i] = false;
   }
+  interrupts();
+
+  Serial.printf("E=%ld,%ld,%ld,%ld|B=%d,%d,%d,%d\n",
+                e[0], e[1], e[2], e[3],
+                b[0] ? 1 : 0, b[1] ? 1 : 0, b[2] ? 1 : 0, b[3] ? 1 : 0);
+
+  delay(10);
 }
