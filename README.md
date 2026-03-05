@@ -9,6 +9,11 @@ The goal of this project is to control application volume levels on a Windows PC
 
 ---
 
+## Disclaimer
+This software was partially created using Ai.
+
+---
+
 ## Features
 
 - 4 rotary encoders (EC11 style, incremental)
@@ -89,12 +94,7 @@ python volumemeter.py
 ---
 
 ## Next Steps
-
-- Integrate Windows Core Audio API (e.g. pycaw)
-- Add per-application volume mapping
-- Implement master volume mode
 - Add OLED display or LED feedback
-- Design a custom PCB
 
 ---
 

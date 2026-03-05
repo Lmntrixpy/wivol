@@ -7,11 +7,12 @@ import sys
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+
 # =========================
 # Config
 # =========================
 
-CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
+CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config-usb.json")
 
 
 def load_config() -> Dict[str, Any]:
@@ -45,9 +46,12 @@ class VolumeBackend:
 class WindowsBackend(VolumeBackend):
     def __init__(self, apply_to_all_sessions: bool = True) -> None:
         self.apply_to_all_sessions = apply_to_all_sessions
+
         try:
+            from comtypes import CLSCTX_ALL, CoInitialize  # type: ignore
+            CoInitialize()
+
             from ctypes import POINTER, cast  # noqa: F401
-            from comtypes import CLSCTX_ALL  # type: ignore
             from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume  # type: ignore
 
             self._AudioUtilities = AudioUtilities
@@ -55,6 +59,8 @@ class WindowsBackend(VolumeBackend):
             self._CLSCTX_ALL = CLSCTX_ALL
             self._cast = cast
             self._POINTER = POINTER
+
+            self._endpoint = None  # cached IAudioEndpointVolume
         except Exception as e:
             raise RuntimeError(
                 "Windows audio backend not available. Install dependencies:\n"
@@ -62,13 +68,26 @@ class WindowsBackend(VolumeBackend):
                 f"Original error: {e}"
             )
 
+    def _get_endpoint(self):
+        if self._endpoint is not None:
+            return self._endpoint
+
+        device = self._AudioUtilities.GetSpeakers()
+
+        try:
+            endpoint = device.EndpointVolume.QueryInterface(self._IAudioEndpointVolume)
+        except Exception:
+            interface = device.Activate(self._IAudioEndpointVolume._iid_, self._CLSCTX_ALL, None)
+            endpoint = self._cast(interface, self._POINTER(self._IAudioEndpointVolume))
+
+        self._endpoint = endpoint
+        return endpoint
+
     def set_master(self, volume_0_100: int) -> None:
         volume_0_100 = max(0, min(100, int(volume_0_100)))
         vol = volume_0_100 / 100.0
 
-        devices = self._AudioUtilities.GetSpeakers()
-        interface = devices.Activate(self._IAudioEndpointVolume._iid_, self._CLSCTX_ALL, None)
-        endpoint = self._cast(interface, self._POINTER(self._IAudioEndpointVolume))
+        endpoint = self._get_endpoint()
         endpoint.SetMasterVolumeLevelScalar(vol, None)
 
     def set_app(self, process_name: str, volume_0_100: int) -> bool:
@@ -76,8 +95,10 @@ class WindowsBackend(VolumeBackend):
         vol = volume_0_100 / 100.0
 
         target = (process_name or "").lower()
-        updated = 0
+        if not target:
+            return False
 
+        updated = 0
         sessions = self._AudioUtilities.GetAllSessions()
         for s in sessions:
             if s.Process is None:
@@ -114,21 +135,17 @@ class MacOSBackend(VolumeBackend):
         return p.returncode, p.stdout.strip(), p.stderr.strip()
 
     def set_master(self, volume_0_100: int) -> None:
-        # macOS "set volume output volume X" expects 0..100
         volume_0_100 = max(0, min(100, int(volume_0_100)))
         rc, _, err = self._run_osascript(f"set volume output volume {volume_0_100}")
         if rc != 0:
             raise RuntimeError(f"macOS set volume failed: {err}")
 
     def set_app(self, process_name: str, volume_0_100: int) -> bool:
-        # macOS does not provide a simple built-in per-app volume API.
-        # Keep this as a stub; use set_spotify for Spotify.
         _ = process_name, volume_0_100
         return False
 
     def set_spotify(self, volume_0_100: int) -> bool:
         volume_0_100 = max(0, min(100, int(volume_0_100)))
-        # AppleScript: best-effort; will fail if Spotify isn't running
         rc, _, _ = self._run_osascript(
             f'tell application "{self.spotify_app_name}" to set sound volume to {volume_0_100}'
         )
@@ -146,43 +163,132 @@ def get_backend(cfg: Dict[str, Any]) -> VolumeBackend:
 
 
 # =========================
+# Targets / games helpers
+# =========================
+
+def clamp01(x: int) -> int:
+    return max(0, min(100, int(x)))
+
+
+def _normalize_proc(name: str) -> str:
+    return (name or "").strip()
+
+
+def build_games_map(cfg: Dict[str, Any]) -> Dict[str, List[str]]:
+    games_list = cfg.get("windows", {}).get("games", [])
+    games: Dict[str, List[str]] = {}
+
+    if isinstance(games_list, list):
+        for item in games_list:
+            if not isinstance(item, dict):
+                continue
+            gid = str(item.get("id", "")).strip()
+            procs = item.get("processes", [])
+            if not gid:
+                continue
+            if isinstance(procs, str):
+                procs = [procs]
+            if not isinstance(procs, list):
+                continue
+            cleaned = [_normalize_proc(str(p)) for p in procs if str(p).strip()]
+            if cleaned:
+                games[gid.lower()] = cleaned
+
+    return games
+
+
+def resolve_windows_processes(target: Dict[str, Any], games_map: Dict[str, List[str]]) -> List[str]:
+    ttype = str(target.get("type", "")).lower()
+
+    if ttype == "app":
+        proc = _normalize_proc(str(target.get("process", "")))
+        return [proc] if proc else []
+
+    if ttype == "game":
+        gid = str(target.get("game", "")).strip().lower()
+        return games_map.get(gid, [])
+
+    # Optional: allow "processes": ["a.exe","b.exe"] directly
+    if ttype in ("apps", "processes"):
+        procs = target.get("processes", [])
+        if isinstance(procs, str):
+            procs = [procs]
+        if isinstance(procs, list):
+            cleaned = [_normalize_proc(str(p)) for p in procs if str(p).strip()]
+            return cleaned
+
+    return []
+
+
+# =========================
 # UDP parsing & control loop
 # =========================
 
 PATTERN = re.compile(r"^E=([^|]+)\|B=(.+)$")
 
 
-def clamp01(x: int) -> int:
-    return max(0, min(100, int(x)))
-
-
 def main() -> None:
     cfg = load_config()
     backend = get_backend(cfg)
 
-    listen_ip = cfg.get("udp", {}).get("listen_ip", "0.0.0.0")
-    listen_port = int(cfg.get("udp", {}).get("listen_port", 4210))
-
     enc_cfg: List[Dict[str, Any]] = cfg.get("encoders", [])
     n = len(enc_cfg)
 
+    games_map = build_games_map(cfg) if sys.platform.startswith("win") else {}
+
     # State
     last_counts: List[Optional[int]] = [None] * n
-    volumes: List[int] = [50] * n  # internal volume state 0..100 (per encoder)
+    volumes: List[int] = [50] * n
     last_line: Optional[str] = None
 
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind((listen_ip, listen_port))
-    print(f"Listening UDP on {listen_ip}:{listen_port}")
+    # -------------------------
+    # Serial (USB) setup
+    # -------------------------
+    # Requires: pip install pyserial
+    import serial  # type: ignore
+
+    serial_cfg = cfg.get("serial", {})
+    default_port = "COM5" if sys.platform.startswith("win") else "/dev/tty.usbserial-0001"
+    port = str(serial_cfg.get("port", default_port))
+    baud = int(serial_cfg.get("baud", 115200))
+
+    try:
+        ser = serial.Serial(port, baud, timeout=1)
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed to open serial port {port} @ {baud}. "
+            f"Adjust config.json -> serial.port. Original error: {e}"
+        )
+
+    print(f"Listening Serial on {port} @ {baud} baud")
     print("Format expected: E=v1,v2,v3,v4|B=b1,b2,b3,b4")
 
+    # -------------------------
+    # Main loop
+    # -------------------------
     while True:
-        data, addr = sock.recvfrom(2048)
-        msg = data.decode("utf-8", errors="replace").strip()
+        raw = ser.readline()
+        if not raw:
+            continue
+
+        msg = raw.decode("utf-8", errors="replace").strip()
+        addr_ip = "USB"
+
+        # ESP handshake
+        if msg == "HELLO":
+            # send internal volumes
+            payload = "V=" + ",".join(str(v) for v in volumes) + "\n"
+            try:
+                ser.write(payload.encode("utf-8"))
+                ser.flush()
+                print(f"[USB] -> {payload.strip()}")
+            except Exception as e:
+                print(f"[USB] write error: {e}")
+            continue
 
         m = PATTERN.match(msg)
         if not m:
-            print(f"[{addr[0]}] {msg}")
+            print(f"[{addr_ip}] {msg}")
             continue
 
         e_vals = m.group(1).split(",")
@@ -227,34 +333,35 @@ def main() -> None:
                     target = {}
 
                 ttype = str(target.get("type", "")).lower()
+
                 if ttype in ("master", "system"):
                     try:
                         backend.set_master(volumes[i])
                     except Exception as e:
                         print(f"OS error (encoder {i+1} master): {e}")
-                elif ttype == "app":
-                    proc = str(target.get("process", ""))
-                    ok = False
-                    try:
-                        ok = backend.set_app(proc, volumes[i])
-                    except Exception as e:
-                        print(f"OS error (encoder {i+1} app {proc}): {e}")
-                    if not ok and sys.platform.startswith("win"):
-                        # Helpful hint on Windows if session not found
+
+                elif sys.platform.startswith("win") and ttype in ("app", "game", "apps", "processes"):
+                    procs = resolve_windows_processes(target, games_map)
+                    any_ok = False
+                    for proc in procs:
+                        try:
+                            if backend.set_app(proc, volumes[i]):
+                                any_ok = True
+                        except Exception as e:
+                            print(f"OS error (encoder {i+1} app {proc}): {e}")
+                    if not any_ok and procs:
+                        # Session not found; likely the game/app isn't producing audio yet.
                         pass
+
                 elif ttype == "spotify":
-                    ok = False
                     try:
-                        ok = backend.set_spotify(volumes[i])
+                        backend.set_spotify(volumes[i])
                     except Exception as e:
                         print(f"OS error (encoder {i+1} spotify): {e}")
-                    if not ok and sys.platform == "darwin":
-                        pass
 
             # Buttons (edge is already latched by ESP, value is 1 once)
             if buttons[i] == 1:
                 # Default behavior: toggle mute by setting volume to 0 and back to 50.
-                # Adjust as needed.
                 if volumes[i] > 0:
                     volumes[i] = 0
                 else:
@@ -268,16 +375,18 @@ def main() -> None:
                 try:
                     if ttype in ("master", "system"):
                         backend.set_master(volumes[i])
-                    elif ttype == "app":
-                        backend.set_app(str(target.get("process", "")), volumes[i])
+                    elif sys.platform.startswith("win") and ttype in ("app", "game", "apps", "processes"):
+                        procs = resolve_windows_processes(target, games_map)
+                        for proc in procs:
+                            backend.set_app(proc, volumes[i])
                     elif ttype == "spotify":
                         backend.set_spotify(volumes[i])
                 except Exception as e:
                     print(f"OS error (encoder {i+1} button action): {e}")
 
         # Print a single table-like line (only if changed)
-        parts_e = []
-        parts_b = []
+        parts_e: List[str] = []
+        parts_b: List[str] = []
         for i in range(n):
             parts_e.append(f"E{i+1}={counts[i]:>6}({volumes[i]:>3}%)")
             parts_b.append(f"B{i+1}={buttons[i]}")
@@ -285,7 +394,7 @@ def main() -> None:
 
         if line != last_line:
             ts = datetime.now().strftime("%H:%M:%S")
-            print(f"{ts}  {addr[0]}  {line}")
+            print(f"{ts}  {addr_ip}  {line}")
             last_line = line
 
 
