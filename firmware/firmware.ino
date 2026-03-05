@@ -26,7 +26,7 @@
 #include "wifi_secrets.h"
 
 // Set this to your PC's IP address on your LAN (e.g. 192.168.178.50)
-IPAddress PC_IP(192, 168, 178, 200);
+IPAddress PC_IP(192, 168, 178, 171);
 const uint16_t PC_PORT = 4210;
 
 // Optional: local port (any)
